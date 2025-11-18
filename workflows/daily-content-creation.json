@@ -1,0 +1,566 @@
+{
+  "name": "Daily Content Creation Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Schedule Daily (6 AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LETTA_SERVER_URL }}/v1/agents/{{ $env.AGENT_CONTENT_STRATEGIST_ID }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "Recommend 3 posts for today based on 70/30 experimental vs proven ratio. Return as structured JSON with: idea_id, topic, template_id, template_name, type (experimental/proven)"
+            },
+            {
+              "name": "role",
+              "value": "user"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Get Daily Recommendations (Strategist Agent)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Letta API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse agent response and extract recommendations\nconst response = $input.item.json;\nconst messages = response.messages || [];\nconst lastMessage = messages[messages.length - 1];\n\nlet recommendations = [];\ntry {\n  // Extract JSON from agent response\n  const content = lastMessage.text || lastMessage.content;\n  const jsonMatch = content.match(/\\[.*\\]/s);\n  if (jsonMatch) {\n    recommendations = JSON.parse(jsonMatch[0]);\n  }\n} catch (error) {\n  // Fallback: create sample structure\n  console.error('Failed to parse recommendations:', error);\n}\n\nreturn recommendations.map(rec => ({\n  json: {\n    idea_id: rec.idea_id,\n    topic: rec.topic,\n    angle: rec.angle,\n    template_id: rec.template_id,\n    template_name: rec.template_name,\n    type: rec.type,\n    platform: 'twitter'\n  }\n}));"
+      },
+      "name": "Parse Recommendations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LETTA_SERVER_URL }}/v1/agents/={{ $env.AGENT_CONTENT_GENERATION_ID }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "=Generate a tweet about: {{ $json.topic }}\\nAngle: {{ $json.angle }}\\nUse template: {{ $json.template_name }}\\nSave to queue when done."
+            },
+            {
+              "name": "role",
+              "value": "user"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Generate Post (Content Agent)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Letta API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract generated content from agent response\nconst response = $input.item.json;\nconst messages = response.messages || [];\nconst lastMessage = messages[messages.length - 1];\n\nconst content = lastMessage.text || lastMessage.content;\n\n// Extract tweet text (assumes agent returns in specific format)\nlet tweetText = content;\nconst tweetMatch = content.match(/TWEET:\\s*([\\s\\S]+?)(?:\\n\\n|$)/);\nif (tweetMatch) {\n  tweetText = tweetMatch[1].trim();\n}\n\nreturn [{\n  json: {\n    content: tweetText,\n    idea_id: $('Parse Recommendations').item.json.idea_id,\n    topic: $('Parse Recommendations').item.json.topic,\n    template_id: $('Parse Recommendations').item.json.template_id,\n    type: $('Parse Recommendations').item.json.type,\n    platform: 'twitter',\n    status: 'draft'\n  }\n}];"
+      },
+      "name": "Extract Tweet Content",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_CHANNEL_REVIEWS }}",
+        "text": "=🎯 *New Post Ready for Review*\\n\\n*Topic:* {{ $json.topic }}\\n*Type:* {{ $json.type }}\\n*Platform:* {{ $json.platform }}\\n\\n*Content:*\\n```\\n{{ $json.content }}\\n```\\n\\nReview and approve/reject below:",
+        "otherOptions": {
+          "includeLinkToWorkflow": true
+        },
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "actions",
+              "actionId": "approve_reject",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": "✅ Approve",
+                  "actionId": "approve",
+                  "style": "primary",
+                  "value": "={{ $json.content }}"
+                },
+                {
+                  "type": "button",
+                  "text": "✏️ Edit",
+                  "actionId": "edit",
+                  "value": "={{ $json.content }}"
+                },
+                {
+                  "type": "button",
+                  "text": "❌ Reject",
+                  "actionId": "reject",
+                  "style": "danger",
+                  "value": "={{ $json.content }}"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "name": "Send to Slack for Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "content-approval",
+        "options": {}
+      },
+      "name": "Wait for Approval Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        1560,
+        300
+      ],
+      "webhookId": "content-approval-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.action }}",
+              "operation": "equals",
+              "value2": "approve"
+            }
+          ]
+        }
+      },
+      "name": "Check if Approved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "list",
+          "cachedResultName": "Dan Koe Content Workflow"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Content Queue",
+          "mode": "list",
+          "cachedResultName": "Content Queue"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Type": "={{ $('Extract Tweet Content').item.json.platform }}",
+            "Content": "={{ $json.body.content || $('Extract Tweet Content').item.json.content }}",
+            "Platform": "Twitter",
+            "Status": "Approved",
+            "Scheduled For": "={{ DateTime.now().plus({hours: 3}).toISO() }}",
+            "Idea": [
+              "={{ $('Extract Tweet Content').item.json.idea_id }}"
+            ],
+            "Template": [
+              "={{ $('Extract Tweet Content').item.json.template_id }}"
+            ],
+            "Created By": "System"
+          }
+        },
+        "options": {}
+      },
+      "name": "Save to Content Queue (Approved)",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        200
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "3",
+          "name": "Airtable account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "text": "={{ $('Extract Tweet Content').item.json.content }}"
+      },
+      "name": "Post to Twitter",
+      "type": "n8n-nodes-base.twitter",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        200
+      ],
+      "credentials": {
+        "twitterOAuth2Api": {
+          "id": "4",
+          "name": "Twitter account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Content Queue",
+          "mode": "list"
+        },
+        "id": "={{ $('Save to Content Queue (Approved)').item.json.id }}",
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Status": "Published",
+            "Platform ID": "={{ $json.id_str }}",
+            "Platform URL": "=https://twitter.com/i/web/status/{{ $json.id_str }}",
+            "Published At": "={{ DateTime.now().toISO() }}"
+          }
+        }
+      },
+      "name": "Update Queue Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        200
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "3",
+          "name": "Airtable account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "base": {
+          "__rl": true,
+          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "Content Archive",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Type": "tweet",
+            "Content": "={{ $('Extract Tweet Content').item.json.content }}",
+            "Published At": "={{ DateTime.now().toISO() }}",
+            "Platform ID": "={{ $('Post to Twitter').item.json.id_str }}",
+            "Platform URL": "=https://twitter.com/i/web/status/{{ $('Post to Twitter').item.json.id_str }}",
+            "Format Type": "={{ $('Extract Tweet Content').item.json.type }}",
+            "Tags": "={{ $('Extract Tweet Content').item.json.topic }}"
+          }
+        }
+      },
+      "name": "Archive Content",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        200
+      ],
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "3",
+          "name": "Airtable account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_CHANNEL_ALERTS }}",
+        "text": "=✅ *Post Published!*\\n\\n*Content:* {{ $('Extract Tweet Content').item.json.content }}\\n*Link:* https://twitter.com/i/web/status/{{ $('Post to Twitter').item.json.id_str }}\\n*Type:* {{ $('Extract Tweet Content').item.json.type }}",
+        "otherOptions": {}
+      },
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        200
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_CHANNEL_REVIEWS }}",
+        "text": "=❌ *Post Rejected*\\n\\nThe post was not approved for publishing.\\n\\n*Content:* {{ $('Extract Tweet Content').item.json.content }}",
+        "otherOptions": {}
+      },
+      "name": "Notify Rejection",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        400
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Daily (6 AM)": {
+      "main": [
+        [
+          {
+            "node": "Get Daily Recommendations (Strategist Agent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Daily Recommendations (Strategist Agent)": {
+      "main": [
+        [
+          {
+            "node": "Parse Recommendations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Recommendations": {
+      "main": [
+        [
+          {
+            "node": "Generate Post (Content Agent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Post (Content Agent)": {
+      "main": [
+        [
+          {
+            "node": "Extract Tweet Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Tweet Content": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Slack for Review": {
+      "main": [
+        [
+          {
+            "node": "Wait for Approval Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Approval Webhook": {
+      "main": [
+        [
+          {
+            "node": "Check if Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Approved": {
+      "main": [
+        [
+          {
+            "node": "Save to Content Queue (Approved)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Rejection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Content Queue (Approved)": {
+      "main": [
+        [
+          {
+            "node": "Post to Twitter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to Twitter": {
+      "main": [
+        [
+          {
+            "node": "Update Queue Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Queue Status": {
+      "main": [
+        [
+          {
+            "node": "Archive Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Archive Content": {
+      "main": [
+        [
+          {
+            "node": "Notify Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow-id"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2025-01-15T10:00:00.000Z",
+      "updatedAt": "2025-01-15T10:00:00.000Z",
+      "id": "1",
+      "name": "dan-koe-workflow"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-15T10:00:00.000Z",
+  "versionId": "1"
+}
